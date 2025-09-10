@@ -1,0 +1,471 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+
+// === Xavier's One‑Page, 2000s‑style Microblog ===
+// Requirements covered:
+// - One page with two tabs: "Message Board" and "Timeline"
+// - Yellow background, black accents
+// - Home shows all posts (text, image, or <=15s video)
+// - Text posts auto‑attach a 15s playful generated animation ("video")
+// - Timeline groups posts by week (7‑day blocks) with a circle per week
+//   Each circle shows: AI‑ish overview (emoji + color theme), witty summary,
+//   fun rating (1–5), and a fictional character comparison (mostly anime/cartoons)
+// - Local storage persistence, fully client‑side
+
+// ✨ Notes
+// • The generated animation is a lightweight 2D canvas clip that runs up to 15s
+//   when the post card is visible (simulates your "silly random video").
+// • No external libs required. Pure React + CSS.
+// • 2000s vibe: chunky borders, pixel-ish feel, hover glows, simple tab bar.
+
+// ------------------------------- Styles ---------------------------------
+const styles: Record<string, React.CSSProperties> = {
+  app: {
+    background: "#fff100", // bright yellow
+    minHeight: "100dvh",
+    color: "#000",
+    fontFamily: "Verdana, Geneva, Tahoma, sans-serif",
+  },
+  shell: {
+    maxWidth: 980,
+    margin: "0 auto",
+    padding: "12px 14px 48px",
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "10px 12px",
+    border: "3px solid #000",
+    background: "#fffd7a",
+    boxShadow: "6px 6px 0 #000",
+    marginBottom: 12,
+  },
+  title: {
+    fontWeight: 900,
+    letterSpacing: 0.5,
+    fontSize: 22,
+    textTransform: "uppercase",
+  },
+  tabs: {
+    display: "flex",
+    gap: 8,
+  },
+  tab: (active: boolean): React.CSSProperties => ({
+    padding: "6px 10px",
+    border: "3px solid #000",
+    background: active ? "#000" : "transparent",
+    color: active ? "#fff100" : "#000",
+    cursor: "pointer",
+    fontWeight: 700,
+    textTransform: "uppercase",
+    boxShadow: active ? "4px 4px 0 #000" : "none",
+  }),
+  composer: {
+    border: "3px solid #000",
+    padding: 12,
+    background: "#fff8a6",
+    boxShadow: "6px 6px 0 #000",
+    marginBottom: 16,
+  },
+  fieldRow: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" },
+  select: { border: "3px solid #000", padding: 6, background: "#fff100" },
+  input: { border: "3px solid #000", padding: 6, background: "#fff", minWidth: 220 },
+  textarea: { border: "3px solid #000", padding: 6, background: "#fff", width: "100%", minHeight: 80 },
+  button: {
+    border: "3px solid #000",
+    padding: "8px 12px",
+    background: "#000",
+    color: "#fff100",
+    fontWeight: 800,
+    textTransform: "uppercase",
+    cursor: "pointer",
+  },
+  postGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px,1fr))", gap: 12 },
+  card: {
+    border: "3px solid #000",
+    background: "#fffef0",
+    boxShadow: "6px 6px 0 #000",
+    padding: 12,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  chip: {
+    display: "inline-block",
+    border: "3px solid #000",
+    padding: "2px 6px",
+    background: "#fff100",
+    fontWeight: 700,
+  },
+  timelineWrap: {
+    border: "3px solid #000",
+    background: "#fffef0",
+    padding: 16,
+    boxShadow: "6px 6px 0 #000",
+  },
+  timelineLine: {
+    position: "relative",
+    height: 6,
+    background: "#000",
+    margin: "40px 10px",
+  },
+  weekCircle: (color: string): React.CSSProperties => ({
+    position: "absolute",
+    top: -12,
+    width: 30,
+    height: 30,
+    borderRadius: 999,
+    border: "3px solid #000",
+    background: color,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    boxShadow: "4px 4px 0 #000",
+  }),
+  bubble: {
+    position: "absolute",
+    top: -120,
+    minWidth: 220,
+    maxWidth: 280,
+    background: "#fff",
+    border: "3px solid #000",
+    boxShadow: "4px 4px 0 #000",
+    padding: 10,
+  },
+};
+
+// ------------------------------ Types -----------------------------------
+
+type PostKind = "text" | "image" | "video";
+
+interface Post {
+  id: string;
+  kind: PostKind;
+  content: string; // text, image data URL, or video data URL
+  createdAt: number; // ms
+}
+
+// ---------------------------- Utilities ---------------------------------
+
+const STORAGE_KEY = "xavier_microblog_posts_v1";
+
+function loadPosts(): Post[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: Post[] = JSON.parse(raw);
+    return parsed.sort((a, b) => b.createdAt - a.createdAt);
+  } catch {
+    return [];
+  }
+}
+
+function savePosts(posts: Post[]) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(posts));
+}
+
+function startOfWeek(ts: number): number {
+  const d = new Date(ts);
+  const day = d.getDay(); // 0 = Sun
+  const diff = d.getDate() - day; // go back to Sunday
+  const w = new Date(d);
+  w.setHours(0, 0, 0, 0);
+  w.setDate(diff);
+  return w.getTime();
+}
+
+function groupByWeek(posts: Post[]) {
+  const map = new Map<number, Post[]>();
+  for (const p of posts) {
+    const k = startOfWeek(p.createdAt);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k)!.push(p);
+  }
+  // newest first (rightmost later)
+  return [...map.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+// --- "AI-ish" weekly overview generator (heuristic, client-side) ---
+function analyzeWeek(posts: Post[]) {
+  const text = posts
+    .filter((p) => p.kind === "text")
+    .map((p) => p.content.toLowerCase())
+    .join(" 
+");
+  const scoreKeywords: Record<string, number> = {
+    study: 1,
+    quiz: 1,
+    exam: 1,
+    bio: 1,
+    marvel: 1,
+    rivals: 1,
+    aim: 1,
+    anime: 1,
+    lucki: 1,
+    gym: 1,
+    family: 1,
+    stressed: -1,
+    tired: -1,
+    sick: -2,
+  };
+  let score = 3; // baseline 1-5
+  let hits: string[] = [];
+  for (const k in scoreKeywords) {
+    if (text.includes(k)) {
+      score += scoreKeywords[k];
+      hits.push(k);
+    }
+  }
+  score = Math.max(1, Math.min(5, score));
+
+  const emoji = score >= 5 ? "🔥" : score >= 4 ? "✨" : score >= 3 ? "🙂" : score >= 2 ? "😵" : "💤";
+  const color = score >= 5 ? "#ff6b6b" : score >= 4 ? "#7CFC00" : score >= 3 ? "#87CEFA" : score >= 2 ? "#FFD700" : "#D3D3D3";
+
+  const witty = (() => {
+    if (!posts.length) return "Quiet week—static screen vibes.";
+    if (hits.includes("marvel")) return "Controller warmed, thumbs leveled. GG.";
+    if (hits.includes("study") || hits.includes("exam")) return "Notes stacked higher than my GPA dreams.";
+    if (hits.includes("anime")) return "Peak fiction consumed. Side quests unlocked.";
+    if (hits.includes("family")) return "IRL buff from time with the squad.";
+    return "A bit of everything—like a campus food court.";
+  })();
+
+  const character = (() => {
+    if (hits.includes("study")) return "Light Yagami (study grind, minus the notebook).";
+    if (hits.includes("marvel")) return "Rock Lee (pure training arc energy).";
+    if (hits.includes("anime")) return "Luffy (chaotic good, fun-forward).";
+    if (hits.includes("family")) return "Sokka (heart + jokes, holds the plan together).";
+    if (hits.includes("lucki")) return "Spike Spiegel (cool, reflective, lo‑fi).";
+    return score >= 4 ? "Deku (optimistic progress arc)." : score <= 2 ? "Shinji Ikari (needs a reset + hug)." : "Finn the Human (rolling with it).";
+  })();
+
+  return { score, emoji, color, witty, character };
+}
+
+// ----------------------- Canvas "Video" Generator -----------------------
+function useSillyClip(run: boolean) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    if (!run || !ref.current) return;
+    const canvas = ref.current;
+    const ctx = canvas.getContext("2d")!;
+    let raf = 0;
+    let start = performance.now();
+
+    const icons = ["★", "♦", "☻", "♪", "✦", "✧", "♥", "☯", "☀", "☁", "⚡", "☘", "✌", "♪", "♬"];
+    const palette = ["#000", "#111", "#222"]; // black accents
+
+    function draw(t: number) {
+      const elapsed = (t - start) / 1000;
+      // cap at 15s
+      if (elapsed > 15) return; // stop without scheduling another frame
+
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.fillStyle = "#fffbe6";
+      ctx.fillRect(0, 0, w, h);
+
+      // bouncing shapes
+      for (let i = 0; i < 12; i++) {
+        const x = (Math.sin((elapsed + i) * (0.6 + i * 0.05)) * 0.5 + 0.5) * (w - 40) + 20;
+        const y = (Math.cos((elapsed + i) * (0.8 + i * 0.03)) * 0.5 + 0.5) * (h - 40) + 20;
+        ctx.fillStyle = palette[i % palette.length];
+        ctx.fillRect(x - 6, y - 6, 12, 12);
+        ctx.fillStyle = "#000";
+        ctx.font = "16px monospace";
+        ctx.fillText(icons[i % icons.length], x - 8, y - 10);
+      }
+
+      raf = requestAnimationFrame(draw);
+    }
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [run]);
+  return ref;
+}
+
+function GeneratedClip({ active }: { active: boolean }) {
+  const ref = useSillyClip(active);
+  return <canvas ref={ref} width={360} height={200} style={{ border: "3px solid #000", background: "#fff" }} />;
+}
+
+// ----------------------------- Components -------------------------------
+
+function Composer({ onAdd }: { onAdd: (p: Post) => void }) {
+  const [kind, setKind] = useState<PostKind>("text");
+  const [text, setText] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+
+  const submit = async () => {
+    if (kind === "text" && !text.trim()) return;
+    let content = text.trim();
+    if (kind !== "text" && file) {
+      const b = await file.arrayBuffer();
+      const blob = new Blob([b], { type: file.type });
+      content = await new Promise<string>((res) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result));
+        r.readAsDataURL(blob);
+      });
+    }
+    const post: Post = {
+      id: Math.random().toString(36).slice(2),
+      kind,
+      content,
+      createdAt: Date.now(),
+    };
+    onAdd(post);
+    setText("");
+    setFile(null);
+  };
+
+  return (
+    <div style={styles.composer}>
+      <div style={{ fontWeight: 900, marginBottom: 8, textTransform: "uppercase" }}>New Post</div>
+      <div style={{ ...styles.fieldRow, marginBottom: 8 }}>
+        <label style={styles.chip}>Type</label>
+        <select value={kind} onChange={(e) => setKind(e.target.value as PostKind)} style={styles.select}>
+          <option value="text">Text</option>
+          <option value="image">Image</option>
+          <option value="video">Video (<=15s)</option>
+        </select>
+      </div>
+      {kind === "text" ? (
+        <textarea
+          placeholder="What's on your mind today?"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          style={styles.textarea}
+        />
+      ) : (
+        <div style={styles.fieldRow}>
+          <input
+            type="file"
+            accept={kind === "image" ? "image/*" : "video/*"}
+            onChange={(e) => setFile(e.target.files?.[0] || null)}
+            style={{ ...styles.input, background: "#fffdc1" }}
+          />
+          <span style={{ fontSize: 12 }}>
+            {kind === "video" ? "Tip: keep it short (<= 15s)." : "Upload an image."}
+          </span>
+        </div>
+      )}
+      <div style={{ marginTop: 8 }}>
+        <button onClick={submit} style={styles.button}>Post</button>
+      </div>
+    </div>
+  );
+}
+
+function PostCard({ post }: { post: Post }) {
+  return (
+    <div style={styles.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={styles.chip}>{post.kind.toUpperCase()}</span>
+        <span style={{ fontSize: 12 }}>{new Date(post.createdAt).toLocaleString()}</span>
+      </div>
+      {post.kind === "text" && (
+        <>
+          <div style={{ whiteSpace: "pre-wrap" }}>{post.content}</div>
+          <div style={{ fontSize: 12, opacity: 0.8 }}>Auto clip (15s max):</div>
+          <GeneratedClip active={true} />
+        </>
+      )}
+      {post.kind === "image" && <img src={post.content} alt="upload" style={{ width: "100%", border: "3px solid #000" }} />}
+      {post.kind === "video" && (
+        <video src={post.content} controls style={{ width: "100%", border: "3px solid #000" }} />
+      )}
+    </div>
+  );
+}
+
+function MessageBoard({ posts, onAdd }: { posts: Post[]; onAdd: (p: Post) => void }) {
+  return (
+    <div>
+      <Composer onAdd={onAdd} />
+      <div style={styles.postGrid}>
+        {posts.map((p) => (
+          <PostCard key={p.id} post={p} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Timeline({ posts, onJumpTo }: { posts: Post[]; onJumpTo: (ts: number) => void }) {
+  const weeks = useMemo(() => groupByWeek(posts), [posts]);
+  // compute positions across the line
+  const positions = weeks.map((_, idx) => ((idx + 1) / (weeks.length + 1)) * 100);
+
+  return (
+    <div style={styles.timelineWrap}>
+      <div style={{ fontWeight: 900, textTransform: "uppercase" }}>Timeline</div>
+      <div style={{ fontSize: 12, marginTop: 4 }}>Grouped by 7 days. Click a circle to view that week's posts.</div>
+      <div style={styles.timelineLine}>
+        {weeks.map(([weekStart, wposts], i) => {
+          const { emoji, color, witty, score, character } = analyzeWeek(wposts);
+          return (
+            <div key={weekStart} style={{ position: "absolute", left: `${positions[i]}%`, transform: "translateX(-50%)" }}>
+              <div
+                title={new Date(weekStart).toLocaleDateString()}
+                style={styles.weekCircle(color)}
+                onClick={() => onJumpTo(weekStart)}
+              >
+                <span style={{ fontSize: 16 }}>{emoji}</span>
+              </div>
+              <div style={{ ...styles.bubble }}>
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                  Week of {new Date(weekStart).toLocaleDateString()} — {emoji}
+                </div>
+                <div style={{ fontSize: 13, marginBottom: 6 }}>{witty}</div>
+                <div style={{ fontSize: 13, marginBottom: 6 }}>Rating: {"★".repeat(score)}{"☆".repeat(5 - score)}</div>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Vibes: {character}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {weeks.length === 0 && (
+        <div style={{ marginTop: 12 }}>No posts yet—once you post, weeks will appear here.</div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [tab, setTab] = useState<"board" | "timeline">("board");
+  const [posts, setPosts] = useState<Post[]>(() => loadPosts());
+
+  useEffect(() => savePosts(posts), [posts]);
+
+  const addPost = (p: Post) => setPosts((old) => [p, ...old]);
+
+  const jumpToWeek = (ts: number) => {
+    // Scroll to the first post in that week if present
+    const target = posts.find((p) => startOfWeek(p.createdAt) === ts);
+    if (!target) return;
+    // no global anchors; just switch to board and rely on recency
+    setTab("board");
+  };
+
+  return (
+    <div style={styles.app}>
+      <div style={styles.shell}>
+        <header style={styles.header}>
+          <div style={styles.title}>Xavier • Microboard</div>
+          <nav style={styles.tabs}>
+            <button style={styles.tab(tab === "board")} onClick={() => setTab("board")}>Message Board</button>
+            <button style={styles.tab(tab === "timeline")} onClick={() => setTab("timeline")}>Timeline</button>
+          </nav>
+        </header>
+
+        {tab === "board" ? (
+          <MessageBoard posts={posts} onAdd={addPost} />
+        ) : (
+          <Timeline posts={posts} onJumpTo={jumpToWeek} />
+        )}
+      </div>
+    </div>
+  );
+}
